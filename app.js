@@ -16,10 +16,13 @@
         carouselIndex: 0,
         searchQuery: '',
         sortBy: 'name',
+        category: 'all',
+        favorites: JSON.parse(localStorage.getItem('smarket_favorites') || '[]'),
+        categories: [],
         reportPeriod: 'today', // 'today' | 'week' | 'month' | 'all' | 'custom'
         reportDateFrom: null,
         reportDateTo: null,
-        shopSettings: { name: 'Senimdi Sapa', address: '', deliveryPrice: 500, freeDeliveryFrom: 10000, notice: '', lat: 43.2627, lng: 76.9345 },
+        shopSettings: { name: 'S-Market', address: '', deliveryPrice: 500, freeDeliveryFrom: 10000, notice: '', lat: 43.2627, lng: 76.9345 },
         deliveryMap: null,
         adminMap: null,
         deliveryMarker: null,
@@ -55,6 +58,61 @@
 
     // ========== FORMAT ==========
     const fmt = (n) => new Intl.NumberFormat('ru-RU').format(n || 0) + ' ₸';
+
+    // ========== CATEGORIES & FAVORITES ==========
+    async function loadCategories() {
+        const fallback = ['Продукты', 'Напитки', 'Бытовые товары', 'Красота', 'Электроника'];
+        try {
+            if (window.B2B?.USE_DEMO) state.categories = window.B2B.DemoStore.get('categories', fallback);
+            else {
+                const db = window.db || window.B2B?.db || firebase.firestore();
+                const snap = await db.collection('settings').doc('shop').get();
+                state.categories = snap.exists && Array.isArray(snap.data().categories) ? snap.data().categories : fallback;
+            }
+        } catch { state.categories = fallback; }
+        renderCategoryControls();
+    }
+    async function saveCategories() {
+        if (window.B2B?.USE_DEMO) window.B2B.DemoStore.set('categories', state.categories);
+        else await (window.db || window.B2B?.db || firebase.firestore()).collection('settings').doc('shop').set({ categories: state.categories }, { merge: true });
+        renderCategoryControls();
+    }
+    function renderCategoryControls() {
+        const chips = $('#categoryChips');
+        if (chips) chips.innerHTML = ['all', ...state.categories].map(c => {
+            const label = c === 'all' ? 'Все' : c;
+            const active = state.category === c;
+            return `<button class="category-chip px-4 py-2 rounded-full text-xs font-semibold border ${active ? 'bg-slate-900 text-white border-slate-900' : 'bg-white text-slate-600 border-slate-200 hover:border-blue-300'}" data-category="${escapeHtml(c)}">${escapeHtml(label)}</button>`;
+        }).join('');
+        chips?.querySelectorAll('[data-category]').forEach(b => b.addEventListener('click', () => { state.category=b.dataset.category; renderCategoryControls(); renderCatalog(); }));
+        const select = $('#prodCategory');
+        if (select) { const current=select.value; select.innerHTML='<option value="">Без категории</option>'+state.categories.map(c=>`<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join(''); select.value=current; }
+        const admin = $('#adminCategoriesList');
+        if (admin) admin.innerHTML = state.categories.map(c => `<span class="inline-flex items-center gap-2 px-3 py-2 rounded-full bg-slate-100 text-slate-700 text-xs font-semibold"><span>${escapeHtml(c)}</span><button data-remove-category="${escapeHtml(c)}" class="text-slate-400 hover:text-rose-500">×</button></span>`).join('');
+        admin?.querySelectorAll('[data-remove-category]').forEach(b=>b.addEventListener('click', async()=>{ const c=b.dataset.removeCategory; state.categories=state.categories.filter(x=>x!==c); state.products.forEach(p=>{if(p.category===c)p.category='';}); await saveCategories(); renderCatalog(); renderAdminProducts(); }));
+    }
+    function toggleFavorite(id) {
+        const set = new Set(state.favorites);
+        set.has(id) ? set.delete(id) : set.add(id);
+        state.favorites = [...set]; localStorage.setItem('smarket_favorites', JSON.stringify(state.favorites));
+        renderCatalog(); renderFavorites();
+    }
+    function renderFavorites() {
+        const list=$('#favoriteList'), empty=$('#emptyFavorites'); if(!list)return;
+        const items=state.products.filter(p=>state.favorites.includes(p.id));
+        empty?.classList.toggle('hidden', items.length>0);
+        list.innerHTML=items.map(p=>productCard(p)).join(''); bindProductActions(list);
+    }
+    function productCard(p) {
+        const qty=state.cart[p.id]||0, fav=state.favorites.includes(p.id);
+        const img=p.image||`https://ui-avatars.com/api/?name=${encodeURIComponent(p.name)}&background=eff6ff&color=2563eb&size=200`;
+        return `<div class="marketplace-card bg-white border border-slate-200 rounded-3xl overflow-hidden shadow-sm flex flex-col">
+          <div class="aspect-square bg-slate-50 relative overflow-hidden"><img src="${img}" alt="${escapeHtml(p.name)}" class="w-full h-full object-cover" loading="lazy" onerror="this.src='https://ui-avatars.com/api/?name=${encodeURIComponent(p.name)}&background=eff6ff&color=2563eb&size=200'">
+          <button class="absolute top-3 right-3 w-9 h-9 rounded-full bg-white/95 shadow flex items-center justify-center ${fav?'text-rose-500':'text-slate-400'}" data-action="fav" data-id="${p.id}" aria-label="Избранное"><i data-lucide="heart" class="w-4 h-4 ${fav?'fill-current':''}"></i></button>
+          ${p.category?`<span class="absolute left-3 bottom-3 px-2.5 py-1 rounded-full bg-white/90 text-[10px] font-semibold text-slate-600">${escapeHtml(p.category)}</span>`:''}</div>
+          <div class="p-4 flex flex-col flex-1"><h4 class="font-bold text-slate-800 text-sm leading-tight line-clamp-2 mb-2">${escapeHtml(p.name)}</h4><div class="text-blue-600 font-extrabold text-lg">${fmt(p.price)}</div><div class="text-xs text-slate-400 mt-1 mb-4">В наличии: ${p.stock} шт.</div><div class="mt-auto">${qty>0?`<div class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-2xl p-1"><button class="w-8 h-8 rounded-xl bg-white shadow font-bold" data-action="dec" data-id="${p.id}">−</button><span class="font-bold text-sm">${qty}</span><button class="w-8 h-8 rounded-xl bg-white shadow font-bold" data-action="inc" data-id="${p.id}">+</button></div>`:`<button class="w-full py-3 bg-slate-900 hover:bg-blue-700 text-white text-xs font-semibold rounded-2xl" data-action="add" data-id="${p.id}">В корзину</button>`}</div></div></div>`;
+    }
+    function bindProductActions(list) { list.querySelectorAll('[data-action]').forEach(btn=>btn.addEventListener('click',e=>{e.stopPropagation();const a=btn.dataset.action,id=btn.dataset.id;if(a==='fav')toggleFavorite(id);if(a==='add'||a==='inc')addToCart(id,1);if(a==='dec')addToCart(id,-1);})); if(window.lucide)lucide.createIcons(); }
 
     // ========== DATA LAYER ==========
     async function loadProducts() {
@@ -187,7 +245,7 @@
 
     // ========== SHOP / DELIVERY SETTINGS ==========
     async function loadShopSettings() {
-        const fallback = { name: 'Senimdi Sapa', address: '', deliveryPrice: 500, freeDeliveryFrom: 10000, notice: '', lat: 43.2627, lng: 76.9345 };
+        const fallback = { name: 'S-Market', address: '', deliveryPrice: 500, freeDeliveryFrom: 10000, notice: '', lat: 43.2627, lng: 76.9345, categories: ['Все товары'] };
         if (window.B2B && window.B2B.USE_DEMO) {
             state.shopSettings = { ...fallback, ...(window.B2B.DemoStore.get('shopSettings', {}) || {}) };
             return;
@@ -283,12 +341,12 @@
                 <div class="flex justify-between gap-3"><div><b class="text-slate-800">Заказ #${escapeHtml(String(inv.id).slice(-8))}</b><div class="text-xs text-slate-400 mt-1">${inv.createdAt ? new Date(inv.createdAt).toLocaleString('ru-RU') : '—'}</div></div><span class="px-3 py-1 rounded-full bg-amber-100 text-amber-700 text-xs font-bold">${escapeHtml(inv.status || 'Новый')}</span></div>
                 <div class="text-sm text-slate-600 mt-3">${(inv.items||[]).map(i => `${escapeHtml(i.name)} × ${i.qty}`).join(', ')}</div>
                 <div class="flex flex-wrap gap-3 mt-3 text-xs"><span>Товары: <b>${fmt(inv.subtotal ?? inv.total)}</b></span><span>Доставка: <b>${fmt(inv.deliveryFee || 0)}</b></span><span class="text-pink-600">Итого: <b>${fmt(inv.total)}</b></span></div>
-                ${inv.deliveryAddress ? `<div class="text-xs text-slate-500 mt-2">📍 ${escapeHtml(inv.deliveryAddress)}</div>` : ''}
+                ${inv.deliveryAddress ? `<div class="text-xs text-slate-500 mt-2">${escapeHtml(inv.deliveryAddress)}</div>` : ''}
             </div>`).join('');
     }
 
     // ========== AUTH ==========
-    async function showApp(user, role = 'seller') {
+    async function showApp(user, role = 'buyer') {
         state.user = user;
         state.role = role;
         $('#authScreen')?.classList.add('hidden');
@@ -409,73 +467,12 @@
 
     // ========== RENDER CATALOG ==========
     function renderCatalog() {
-        const list = $('#productList');
-        const empty = $('#emptyCatalog');
-        if (!list) return;
-
-        let items = [...state.products];
-        
-        if (state.searchQuery) {
-            const q = state.searchQuery.toLowerCase();
-            items = items.filter(p => p.name.toLowerCase().includes(q));
-        }
-        
-        switch (state.sortBy) {
-            case 'price-asc': items.sort((a, b) => a.price - b.price); break;
-            case 'price-desc': items.sort((a, b) => b.price - a.price); break;
-            case 'stock': items.sort((a, b) => b.stock - a.stock); break;
-            default: items.sort((a, b) => a.name.localeCompare(b.name, 'ru'));
-        }
-        
-        if (items.length === 0) {
-            list.innerHTML = '';
-            empty?.classList.remove('hidden');
-            return;
-        }
-        empty?.classList.add('hidden');
-        
-        list.innerHTML = items.map(p => {
-            const qty = state.cart[p.id] || 0;
-            const img = p.image || `https://ui-avatars.com/api/?name=${encodeURIComponent(p.name)}&background=fce7f3&color=db2777&size=200`;
-            return `
-            <div class="bg-white border border-pink-100 rounded-3xl overflow-hidden shadow-sm flex flex-col transition-all hover:shadow-md hover:border-pink-200">
-                <div class="aspect-square bg-slate-50 relative overflow-hidden">
-                    <img src="${img}" alt="${escapeHtml(p.name)}" class="w-full h-full object-cover" loading="lazy"
-                         onerror="this.src='https://ui-avatars.com/api/?name=${encodeURIComponent(p.name)}&background=fce7f3&color=db2777&size=200'">
-                    ${p.stock < 10 ? '<span class="absolute top-3 left-3 text-[10px] px-2 py-0.5 bg-rose-500 text-white font-semibold rounded-full shadow-sm">Мало на складе</span>' : ''}
-                </div>
-                <div class="p-4 flex flex-col flex-1">
-                    <h4 class="font-bold text-slate-800 text-sm leading-tight line-clamp-2 mb-1">${escapeHtml(p.name)}</h4>
-                    <div class="text-pink-600 font-extrabold text-base mb-1">${fmt(p.price)}</div>
-                    <div class="text-xs text-slate-400 mb-4 font-medium">Остаток: ${p.stock} шт</div>
-                    <div class="mt-auto">
-                        ${qty > 0 ? `
-                            <div class="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-2xl p-1">
-                                <button class="w-8 h-8 flex items-center justify-center rounded-xl bg-white text-slate-700 shadow-sm font-bold active:scale-95" data-action="dec" data-id="${p.id}">−</button>
-                                <span class="font-bold text-slate-800 text-sm px-2">${qty}</span>
-                                <button class="w-8 h-8 flex items-center justify-center rounded-xl bg-white text-slate-700 shadow-sm font-bold active:scale-95" data-action="inc" data-id="${p.id}">+</button>
-                            </div>
-                        ` : `
-                            <button class="w-full py-2.5 bg-gradient-to-r from-pink-500 to-violet-500 hover:from-pink-600 hover:to-violet-600 text-white text-xs font-semibold rounded-2xl shadow-sm transition-all active:scale-95" data-action="add" data-id="${p.id}">
-                                В накладную
-                            </button>
-                        `}
-                    </div>
-                </div>
-            </div>`;
-        }).join('');
-        
-        list.querySelectorAll('[data-action]').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const id = btn.dataset.id;
-                const action = btn.dataset.action;
-                if (action === 'add' || action === 'inc') addToCart(id, 1);
-                if (action === 'dec') addToCart(id, -1);
-            });
-        });
-        
-        if (window.lucide) lucide.createIcons();
+        const list=$('#productList'), empty=$('#emptyCatalog'); if(!list)return;
+        let items=[...state.products];
+        if(state.category!=='all') items=items.filter(p=>(p.category||'')===state.category);
+        if(state.searchQuery){const q=state.searchQuery.toLowerCase();items=items.filter(p=>(p.name||'').toLowerCase().includes(q));}
+        switch(state.sortBy){case 'price-asc':items.sort((a,b)=>a.price-b.price);break;case 'price-desc':items.sort((a,b)=>b.price-a.price);break;case 'stock':items.sort((a,b)=>b.stock-a.stock);break;default:items.sort((a,b)=>(a.name||'').localeCompare(b.name||'','ru'));}
+        empty?.classList.toggle('hidden',items.length>0); list.innerHTML=items.map(productCard).join(''); bindProductActions(list);
     }
 
     // ========== RENDER INVOICE ==========
@@ -1116,12 +1113,14 @@
         await loadProducts();
         await loadInvoices();
         await loadShopSettings();
+        await loadCategories();
         renderCatalog();
         renderCarousel();
         updateCartUI();
         renderAdminProducts();
         renderAdminStats();
         renderBuyerOrders();
+        renderFavorites();
         fillShopSettingsForm();
         
         setInterval(() => {
@@ -1136,6 +1135,7 @@
         // Tabs
         $('#tabCatalog')?.addEventListener('click', () => switchTab('catalog'));
         $('#tabInvoice')?.addEventListener('click', () => switchTab('invoice'));
+        $('#tabFavorites')?.addEventListener('click', () => switchTab('favorites'));
         $('#tabOrders')?.addEventListener('click', () => switchTab('orders'));
         $('#deliveryMethod')?.addEventListener('change', updateCartUI);
         $('#deliveryAddress')?.addEventListener('input', updateCartUI);
@@ -1143,6 +1143,7 @@
             if (!navigator.geolocation) return toast('Геолокация недоступна в браузере', 'warn');
             navigator.geolocation.getCurrentPosition(pos => setDeliveryPoint(pos.coords.latitude, pos.coords.longitude), () => toast('Не удалось получить местоположение', 'warn'), { enableHighAccuracy: true, timeout: 10000 });
         });
+        $('#addCategoryBtn')?.addEventListener('click', async () => { const name=$('#newCategoryName')?.value.trim(); if(!name)return toast('Введите название категории','warn'); if(state.categories.includes(name))return toast('Такая категория уже есть','warn'); state.categories.push(name); $('#newCategoryName').value=''; await saveCategories(); toast('Категория добавлена','success'); });
         $('#saveShopSettingsBtn')?.addEventListener('click', saveShopSettings);
         $('#tabAdmin')?.addEventListener('click', () => switchTab('admin'));
         
@@ -1285,6 +1286,7 @@
             const price = +$('#prodPrice').value;
             const costPrice = +$('#prodCostPrice').value || 0;
             const stock = +$('#prodStock').value;
+            const category = $('#prodCategory')?.value || '';
             const imageUrlInput = $('#prodImageUrl')?.value.trim();
             const fileInput = $('#prodImage');
             
@@ -1304,6 +1306,7 @@
                 price,
                 costPrice,
                 stock,
+                category,
                 image
             };
             
